@@ -14,6 +14,7 @@ Model = require './model'
 {$} = require './space-pen-extensions'
 WindowEventHandler = require './window-event-handler'
 StylesElement = require './styles-element'
+StorageFolder = require './storage-folder'
 
 # Essential: Atom global for dealing with packages, themes, menus, and the window.
 #
@@ -73,34 +74,24 @@ class Atom extends Model
   # Loads and returns the serialized state corresponding to this window
   # if it exists; otherwise returns undefined.
   @loadState: (mode) ->
-    statePath = @getStatePath(@getLoadSettings().initialPaths, mode)
+    if stateKey = @getStateKey(@getLoadSettings().initialPaths, mode)
+      if state = @getStorageFolder().load(stateKey)
+        return state
 
-    if fs.existsSync(statePath)
+    if windowState = @getLoadSettings().windowState
       try
-        stateString = fs.readFileSync(statePath, 'utf8')
+        JSON.parse(@getLoadSettings().windowState)
       catch error
-        console.warn "Error reading window state: #{statePath}", error.stack, error
-    else
-      stateString = @getLoadSettings().windowState
-
-    try
-      JSON.parse(stateString) if stateString?
-    catch error
-      console.warn "Error parsing window state: #{statePath} #{error.stack}", error
+        console.warn "Error parsing window state: #{statePath} #{error.stack}", error
 
   # Returns the path where the state for the current window will be
   # located if it exists.
-  @getStatePath: (paths, mode) ->
-    switch mode
-      when 'spec'
-        filename = 'spec'
-      when 'editor'
-        if paths?.length > 0
-          sha1 = crypto.createHash('sha1').update(paths.slice().sort().join("\n")).digest('hex')
-          filename = "editor-#{sha1}"
-
-    if filename
-      path.join(@getStorageDirPath(), filename)
+  @getStateKey: (paths, mode) ->
+    if mode is 'spec'
+      'spec'
+    else if mode is 'editor' and paths?.length > 0
+      sha1 = crypto.createHash('sha1').update(paths.slice().sort().join("\n")).digest('hex')
+      "editor-#{sha1}"
     else
       null
 
@@ -110,11 +101,8 @@ class Atom extends Model
   @getConfigDirPath: ->
     @configDirPath ?= process.env.ATOM_HOME
 
-  # Get the path to Atom's storage directory.
-  #
-  # Returns the absolute path to ~/.atom/storage
-  @getStorageDirPath: ->
-    @storageDirPath ?= path.join(@getConfigDirPath(), 'storage')
+  @getStorageFolder: ->
+    @storageFolder ?= new StorageFolder(@getConfigDirPath())
 
   # Returns the load settings hash associated with the current window.
   @getLoadSettings: ->
@@ -227,7 +215,7 @@ class Atom extends Model
 
       if openDevTools
         @openDevTools()
-        @executeJavaScriptInDevTools('InspectorFrontendAPI.showConsole()')
+        @executeJavaScriptInDevTools('DevToolsAPI.showConsole()')
 
       @emit 'uncaught-error', arguments... if includeDeprecatedAPIs
       @emitter.emit 'did-throw-error', {message, url, line, column, originalError}
@@ -412,10 +400,11 @@ class Atom extends Model
   open: (options) ->
     ipc.send('open', options)
 
-  # Extended: Show the native dialog to prompt the user to select a folder.
+  # Extended: Prompt the user to select one or more folders.
   #
-  # * `callback` A {Function} to call once the user has selected a folder.
-  #   * `path` {String} the path to the folder the user selected.
+  # * `callback` A {Function} to call once the user has confirmed the selection.
+  #   * `paths` An {Array} of {String} paths that the user selected, or `null`
+  #     if the user dismissed the dialog.
   pickFolder: (callback) ->
     responseChannel = "atom-pick-folder-response"
     ipc.on responseChannel, (path) ->
@@ -498,7 +487,7 @@ class Atom extends Model
 
   # Extended: Toggle the full screen state of the current window.
   toggleFullScreen: ->
-    @setFullScreen(!@isFullScreen())
+    @setFullScreen(not @isFullScreen())
 
   # Schedule the window to be shown and focused on the next tick.
   #
@@ -585,12 +574,12 @@ class Atom extends Model
 
   # Call this method when establishing a real application window.
   startEditorWindow: ->
-    {resourcePath, safeMode} = @getLoadSettings()
+    {safeMode} = @getLoadSettings()
 
     CommandInstaller = require './command-installer'
-    CommandInstaller.installAtomCommand resourcePath, false, (error) ->
+    CommandInstaller.installAtomCommand false, (error) ->
       console.warn error.message if error?
-    CommandInstaller.installApmCommand resourcePath, false, (error) ->
+    CommandInstaller.installApmCommand false, (error) ->
       console.warn error.message if error?
 
     dimensions = @restoreWindowDimensions()
@@ -728,7 +717,10 @@ class Atom extends Model
     @workspace = Workspace.deserialize(@state.workspace) ? new Workspace
 
     workspaceElement = @views.getView(@workspace)
-    @__workspaceView = workspaceElement.__spacePenView
+
+    if includeDeprecatedAPIs
+      @__workspaceView = workspaceElement.__spacePenView
+
     @deserializeTimings.workspace = Date.now() - startTime
 
     @keymaps.defaultTarget = workspaceElement
@@ -773,6 +765,10 @@ class Atom extends Model
   setRepresentedFilename: (filename) ->
     ipc.send('call-window-method', 'setRepresentedFilename', filename)
 
+  addProjectFolder: ->
+    @pickFolder (selectedPaths = []) =>
+      @project.addPath(selectedPath) for selectedPath in selectedPaths
+
   showSaveDialog: (callback) ->
     callback(showSaveDialogSync())
 
@@ -783,11 +779,10 @@ class Atom extends Model
     dialog.showSaveDialog currentWindow, {title: 'Save File', defaultPath}
 
   saveSync: ->
-    stateString = JSON.stringify(@state)
-    if statePath = @constructor.getStatePath(@project?.getPaths(), @mode)
-      fs.writeFileSync(statePath, stateString, 'utf8')
+    if storageKey = @constructor.getStateKey(@project?.getPaths(), @mode)
+      @constructor.getStorageFolder().store(storageKey, @state)
     else
-      @getCurrentWindow().loadSettings.windowState = stateString
+      @getCurrentWindow().loadSettings.windowState = JSON.stringify(@state)
 
   crashMainProcess: ->
     remote.process.crash()
@@ -841,7 +836,7 @@ class Atom extends Model
 
   setAutoHideMenuBar: (autoHide) ->
     ipc.send('call-window-method', 'setAutoHideMenuBar', autoHide)
-    ipc.send('call-window-method', 'setMenuBarVisibility', !autoHide)
+    ipc.send('call-window-method', 'setMenuBarVisibility', not autoHide)
 
 if includeDeprecatedAPIs
   # Deprecated: Callers should be converted to use atom.deserializers

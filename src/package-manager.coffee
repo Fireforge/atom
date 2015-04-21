@@ -111,7 +111,7 @@ class PackageManager
 
     commandName = 'apm'
     commandName += '.cmd' if process.platform is 'win32'
-    apmRoot = path.resolve(__dirname, '..', 'apm')
+    apmRoot = path.join(process.resourcesPath, 'app', 'apm')
     @apmPath = path.join(apmRoot, 'bin', commandName)
     unless fs.isFileSync(@apmPath)
       @apmPath = path.join(apmRoot, 'node_modules', 'atom-package-manager', 'bin', commandName)
@@ -276,8 +276,7 @@ class PackageManager
   getPackageDependencies: ->
     unless @packageDependencies?
       try
-        metadataPath = path.join(@resourcePath, 'package.json')
-        {@packageDependencies} = JSON.parse(fs.readFileSync(metadataPath)) ? {}
+        @packageDependencies = require('../package.json')?.packageDependencies
       @packageDependencies ?= {}
 
     @packageDependencies

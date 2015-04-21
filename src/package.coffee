@@ -11,10 +11,7 @@ Q = require 'q'
 ModuleCache = require './module-cache'
 ScopedProperties = require './scoped-properties'
 
-try
-  packagesCache = require('../package.json')?._atomPackages ? {}
-catch error
-  packagesCache = {}
+packagesCache = require('../package.json')?._atomPackages ? {}
 
 # Loads and activates a package's main module and resources such as
 # stylesheets, keymaps, grammar, editor properties, and menus.
@@ -308,8 +305,11 @@ class Package
 
     deferred = Q.defer()
     grammarsDirPath = path.join(@path, 'grammars')
-    fs.list grammarsDirPath, ['json', 'cson'], (error, grammarPaths=[]) ->
-      async.each grammarPaths, loadGrammar, -> deferred.resolve()
+    fs.exists grammarsDirPath, (grammarsDirExists) ->
+      return deferred.resolve() unless grammarsDirExists
+
+      fs.list grammarsDirPath, ['json', 'cson'], (error, grammarPaths=[]) ->
+        async.each grammarPaths, loadGrammar, -> deferred.resolve()
     deferred.promise
 
   loadSettings: ->
@@ -334,8 +334,11 @@ class Package
     else
       settingsDirPath = path.join(@path, 'settings')
 
-    fs.list settingsDirPath, ['json', 'cson'], (error, settingsPaths=[]) ->
-      async.each settingsPaths, loadSettingsFile, -> deferred.resolve()
+    fs.exists settingsDirPath, (settingsDirExists) ->
+      return deferred.resolve() unless settingsDirExists
+
+      fs.list settingsDirPath, ['json', 'cson'], (error, settingsPaths=[]) ->
+        async.each settingsPaths, loadSettingsFile, -> deferred.resolve()
     deferred.promise
 
   serialize: ->
@@ -374,7 +377,12 @@ class Package
 
   reloadStylesheets: ->
     oldSheets = _.clone(@stylesheets)
-    @loadStylesheets()
+
+    try
+      @loadStylesheets()
+    catch error
+      @handleError("Failed to reload the #{@name} package stylesheets", error)
+
     @stylesheetDisposables?.dispose()
     @stylesheetDisposables = new CompositeDisposable
     @stylesheetsActivated = false

@@ -3,6 +3,7 @@ ApplicationMenu = require './application-menu'
 AtomProtocolHandler = require './atom-protocol-handler'
 AutoUpdateManager = require './auto-update-manager'
 BrowserWindow = require 'browser-window'
+StorageFolder = require '../storage-folder'
 Menu = require 'menu'
 app = require 'app'
 fs = require 'fs-plus'
@@ -43,7 +44,6 @@ class AtomApplication
       createAtomApplication()
       return
 
-
     client = net.connect {path: options.socketPath}, ->
       client.write JSON.stringify(options), ->
         client.end()
@@ -78,10 +78,13 @@ class AtomApplication
     @listenForArgumentsFromNewProcess()
     @setupJavaScriptArguments()
     @handleEvents()
+    @storageFolder = new StorageFolder(process.env.ATOM_HOME)
 
-    @openWithOptions(options)
+    if options.pathsToOpen?.length > 0 or options.urlsToOpen?.length > 0 or options.test
+      @openWithOptions(options)
+    else
+      @loadState() or @openPath(options)
 
-  # Opens a new window based on the options provided.
   openWithOptions: ({pathsToOpen, urlsToOpen, test, pidToKillWhenClosed, devMode, safeMode, apiPreviewMode, newWindow, specDirectory, logFile}) ->
     if test
       @runSpecs({exitWhenDone: true, @resourcePath, specDirectory, logFile})
@@ -95,7 +98,7 @@ class AtomApplication
   # Public: Removes the {AtomWindow} from the global window list.
   removeWindow: (window) ->
     @windows.splice @windows.indexOf(window), 1
-    @applicationMenu?.enableWindowSpecificItems(false) if @windows.length == 0
+    @applicationMenu?.enableWindowSpecificItems(false) if @windows.length is 0
 
   # Public: Adds the {AtomWindow} to the global window list.
   addWindow: (window) ->
@@ -169,7 +172,7 @@ class AtomApplication
     @on 'application:open-roadmap', -> require('shell').openExternal('https://atom.io/roadmap?app')
     @on 'application:open-faq', -> require('shell').openExternal('https://atom.io/faq')
     @on 'application:open-terms-of-use', -> require('shell').openExternal('https://atom.io/terms')
-    @on 'application:report-issue', -> require('shell').openExternal('https://github.com/atom/atom/issues/new')
+    @on 'application:report-issue', -> require('shell').openExternal('https://github.com/atom/atom/blob/master/CONTRIBUTING.md#submitting-issues')
     @on 'application:search-issues', -> require('shell').openExternal('https://github.com/issues?q=+is%3Aissue+user%3Aatom')
 
     @on 'application:install-update', -> @autoUpdateManager.install()
@@ -193,10 +196,13 @@ class AtomApplication
     @openPathOnEvent('application:open-your-keymap', 'atom://.atom/keymap')
     @openPathOnEvent('application:open-your-snippets', 'atom://.atom/snippets')
     @openPathOnEvent('application:open-your-stylesheet', 'atom://.atom/stylesheet')
-    @openPathOnEvent('application:open-license', path.join(@resourcePath, 'LICENSE.md'))
+    @openPathOnEvent('application:open-license', path.join(process.resourcesPath, 'LICENSE.md'))
 
     app.on 'window-all-closed', ->
       app.quit() if process.platform in ['win32', 'linux']
+
+    app.on 'before-quit', =>
+      @saveState()
 
     app.on 'will-quit', =>
       @killAllProcesses()
@@ -256,7 +262,7 @@ class AtomApplication
 
     clipboard = null
     ipc.on 'write-text-to-selection-clipboard', (event, selectedText) ->
-      clipboard ?= require 'clipboard'
+      clipboard ?= require '../safe-clipboard'
       clipboard.writeText(selectedText, 'selection')
 
   # Public: Executes the given command.
@@ -328,7 +334,7 @@ class AtomApplication
   focusedWindow: ->
     _.find @windows, (atomWindow) -> atomWindow.isFocused()
 
-  # Public: Opens multiple paths, in existing windows if possible.
+  # Public: Opens a single path, in an existing window if possible.
   #
   # options -
   #   :pathToOpen - The file path to open
@@ -341,7 +347,7 @@ class AtomApplication
   openPath: ({pathToOpen, pidToKillWhenClosed, newWindow, devMode, safeMode, apiPreviewMode, window}) ->
     @openPaths({pathsToOpen: [pathToOpen], pidToKillWhenClosed, newWindow, devMode, safeMode, apiPreviewMode, window})
 
-  # Public: Opens a single path, in an existing window if possible.
+  # Public: Opens multiple paths, in existing windows if possible.
   #
   # options -
   #   :pathsToOpen - The array of file paths to open
@@ -410,6 +416,33 @@ class AtomApplication
       if error.code isnt 'ESRCH'
         console.log("Killing process #{pid} failed: #{error.code ? error.message}")
     delete @pidsToOpenWindows[pid]
+
+  saveState: ->
+    states = []
+    for window in @windows
+      if loadSettings = window.getLoadSettings()
+        unless loadSettings.isSpec
+          states.push(_.pick(loadSettings,
+            'initialPaths'
+            'devMode'
+            'safeMode'
+            'apiPreviewMode'
+          ))
+    @storageFolder.store('application.json', states)
+
+  loadState: ->
+    if (states = @storageFolder.load('application.json'))?.length > 0
+      for state in states
+        @openWithOptions({
+          pathsToOpen: state.initialPaths
+          urlsToOpen: []
+          devMode: state.devMode
+          safeMode: state.safeMode
+          apiPreviewMode: state.apiPreviewMode
+        })
+      true
+    else
+      false
 
   # Open an atom:// url.
   #

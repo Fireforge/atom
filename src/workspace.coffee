@@ -2,13 +2,12 @@
 _ = require 'underscore-plus'
 path = require 'path'
 {join} = path
-{Model} = require 'theorist'
 Q = require 'q'
 Serializable = require 'serializable'
 {Emitter, Disposable, CompositeDisposable} = require 'event-kit'
 Grim = require 'grim'
 fs = require 'fs-plus'
-StackTraceParser = require 'stacktrace-parser'
+Model = require './model'
 TextEditor = require './text-editor'
 PaneContainer = require './pane-container'
 Pane = require './pane'
@@ -33,13 +32,13 @@ class Workspace extends Model
   atom.deserializers.add(this)
   Serializable.includeInto(this)
 
-  @properties
-    paneContainer: null
-    fullScreen: false
-    destroyedItemURIs: -> []
-
   constructor: (params) ->
     super
+
+    unless Grim.includeDeprecatedAPIs
+      @paneContainer = params?.paneContainer
+      @fullScreen = params?.fullScreen ? false
+      @destroyedItemURIs = params?.destroyedItemURIs ? []
 
     @emitter = new Emitter
     @openers = []
@@ -336,9 +335,12 @@ class Workspace extends Model
   Section: Opening
   ###
 
-  # Essential: Open a given a URI in Atom asynchronously.
+  # Essential: Opens the given URI in Atom asynchronously.
+  # If the URI is already open, the existing item for that URI will be
+  # activated. If no URI is given, or no registered opener can open
+  # the URI, a new empty {TextEditor} will be created.
   #
-  # * `uri` A {String} containing a URI.
+  # * `uri` (optional) A {String} containing a URI.
   # * `options` (optional) {Object}
   #   * `initialLine` A {Number} indicating which row to move the cursor to
   #     initially. Defaults to `0`.
@@ -400,7 +402,7 @@ class Workspace extends Model
     uri = atom.project.resolvePath(uri)
     item = @getActivePane().itemForURI(uri)
     if uri
-      item ?= opener(uri, options) for opener in @getOpeners() when !item
+      item ?= opener(uri, options) for opener in @getOpeners() when not item
     item ?= atom.project.openSync(uri, {initialLine, initialColumn})
 
     @getActivePane().activateItem(item)
@@ -419,7 +421,7 @@ class Workspace extends Model
 
     if uri?
       item = pane.itemForURI(uri)
-      item ?= opener(uri, options) for opener in @getOpeners() when !item
+      item ?= opener(uri, options) for opener in @getOpeners() when not item
 
     try
       item ?= atom.project.open(uri, options)
@@ -494,34 +496,6 @@ class Workspace extends Model
 
   getOpeners: ->
     @openers
-
-  getCallingPackageName: ->
-    error = new Error
-    Error.captureStackTrace(error)
-    stack = StackTraceParser.parse(error.stack)
-
-    packagePaths = @getPackagePathsByPackageName()
-
-    for i in [0...stack.length]
-      stackFramePath = stack[i].file
-
-      # Empty when it was run from the dev console
-      return unless stackFramePath
-
-      for packageName, packagePath of packagePaths
-        continue if stackFramePath is 'node.js'
-        relativePath = path.relative(packagePath, stackFramePath)
-        return packageName unless /^\.\./.test(relativePath)
-    return
-
-  getPackagePathsByPackageName: ->
-    packagePathsByPackageName = {}
-    for pack in atom.packages.getLoadedPackages()
-      packagePath = pack.path
-      if packagePath.indexOf('.atom/dev/packages') > -1 or packagePath.indexOf('.atom/packages') > -1
-        packagePath = fs.realpathSync(packagePath)
-      packagePathsByPackageName[pack.name] = packagePath
-    packagePathsByPackageName
 
   ###
   Section: Pane Items
@@ -865,8 +839,8 @@ class Workspace extends Model
     openPaths = (buffer.getPath() for buffer in atom.project.getBuffers())
     outOfProcessPaths = _.difference(filePaths, openPaths)
 
-    inProcessFinished = !openPaths.length
-    outOfProcessFinished = !outOfProcessPaths.length
+    inProcessFinished = not openPaths.length
+    outOfProcessFinished = not outOfProcessPaths.length
     checkFinished = ->
       deferred.resolve() if outOfProcessFinished and inProcessFinished
 
@@ -892,6 +866,11 @@ class Workspace extends Model
     deferred.promise
 
 if includeDeprecatedAPIs
+  Workspace.properties
+    paneContainer: null
+    fullScreen: false
+    destroyedItemURIs: -> []
+
   Object.defineProperty Workspace::, 'activePaneItem',
     get: ->
       Grim.deprecate "Use ::getActivePaneItem() instead of the ::activePaneItem property"
@@ -901,6 +880,36 @@ if includeDeprecatedAPIs
     get: ->
       Grim.deprecate "Use ::getActivePane() instead of the ::activePane property"
       @getActivePane()
+
+  StackTraceParser = require 'stacktrace-parser'
+
+  Workspace::getCallingPackageName = ->
+    error = new Error
+    Error.captureStackTrace(error)
+    stack = StackTraceParser.parse(error.stack)
+
+    packagePaths = @getPackagePathsByPackageName()
+
+    for i in [0...stack.length]
+      stackFramePath = stack[i].file
+
+      # Empty when it was run from the dev console
+      return unless stackFramePath
+
+      for packageName, packagePath of packagePaths
+        continue if stackFramePath is 'node.js'
+        relativePath = path.relative(packagePath, stackFramePath)
+        return packageName unless /^\.\./.test(relativePath)
+    return
+
+  Workspace::getPackagePathsByPackageName = ->
+    packagePathsByPackageName = {}
+    for pack in atom.packages.getLoadedPackages()
+      packagePath = pack.path
+      if packagePath.indexOf('.atom/dev/packages') > -1 or packagePath.indexOf('.atom/packages') > -1
+        packagePath = fs.realpathSync(packagePath)
+      packagePathsByPackageName[pack.name] = packagePath
+    packagePathsByPackageName
 
   Workspace::eachEditor = (callback) ->
     deprecate("Use Workspace::observeTextEditors instead")

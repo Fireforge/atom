@@ -1,6 +1,5 @@
 _ = require 'underscore-plus'
 fs = require 'fs-plus'
-EmitterMixin = require('emissary').Emitter
 {CompositeDisposable, Disposable, Emitter} = require 'event-kit'
 CSON = require 'season'
 path = require 'path'
@@ -290,7 +289,6 @@ ScopeDescriptor = require './scope-descriptor'
 #
 module.exports =
 class Config
-  EmitterMixin.includeInto(this)
   @schemaEnforcers = {}
 
   @addSchemaEnforcer: (typeName, enforcerFunction) ->
@@ -334,9 +332,16 @@ class Config
     @configFilePath = fs.resolve(@configDirPath, 'config', ['json', 'cson'])
     @configFilePath ?= path.join(@configDirPath, 'config.cson')
     @transactDepth = 0
+    @savePending = false
 
-    @debouncedSave = _.debounce(@save, 100)
-    @debouncedLoad = _.debounce(@loadUserConfig, 100)
+    @requestLoad = _.debounce(@loadUserConfig, 100)
+    @requestSave = =>
+      @savePending = true
+      debouncedSave.call(this)
+    save = =>
+      @savePending = false
+      @save()
+    debouncedSave = _.debounce(save, 100)
 
   ###
   Section: Config Subscription
@@ -607,7 +612,7 @@ class Config
     else
       @setRawValue(keyPath, value)
 
-    @debouncedSave() if source is @getUserConfigPath() and shouldSave and not @configFileHasErrors
+    @requestSave() if source is @getUserConfigPath() and shouldSave and not @configFileHasErrors
     true
 
   # Essential: Restore the setting at `keyPath` to its default value.
@@ -637,7 +642,7 @@ class Config
           _.setValueForKeyPath(settings, keyPath, undefined)
           settings = withoutEmptyObjects(settings)
           @set(null, settings, {scopeSelector, source, priority: @priorityForSource(source)}) if settings?
-          @debouncedSave()
+          @requestSave()
       else
         @scopedSettingsStore.removePropertiesForSourceAndSelector(source, scopeSelector)
         @emitChangeEvent()
@@ -759,9 +764,10 @@ class Config
       CSON.writeFileSync(@configFilePath, {})
 
     try
-      userConfig = CSON.readFileSync(@configFilePath)
-      @resetUserSettings(userConfig)
-      @configFileHasErrors = false
+      unless @savePending
+        userConfig = CSON.readFileSync(@configFilePath)
+        @resetUserSettings(userConfig)
+        @configFileHasErrors = false
     catch error
       @configFileHasErrors = true
       message = "Failed to load `#{path.basename(@configFilePath)}`"
@@ -778,7 +784,7 @@ class Config
   observeUserConfig: ->
     try
       @watchSubscription ?= pathWatcher.watch @configFilePath, (eventType) =>
-        @debouncedLoad() if eventType is 'change' and @watchSubscription?
+        @requestLoad() if eventType is 'change' and @watchSubscription?
     catch error
       @notifyFailure """
         Unable to watch path: `#{path.basename(@configFilePath)}`. Make sure you have permissions to
@@ -1128,7 +1134,7 @@ splitKeyPath = (keyPath) ->
   startIndex = 0
   keyPathArray = []
   for char, i in keyPath
-    if char is '.' and (i is 0 or keyPath[i-1] != '\\')
+    if char is '.' and (i is 0 or keyPath[i-1] isnt '\\')
       keyPathArray.push keyPath.substring(startIndex, i)
       startIndex = i + 1
   keyPathArray.push keyPath.substr(startIndex, keyPath.length)
@@ -1147,6 +1153,9 @@ withoutEmptyObjects = (object) ->
   resultObject
 
 if Grim.includeDeprecatedAPIs
+  EmitterMixin = require('emissary').Emitter
+  EmitterMixin.includeInto(Config)
+
   Config::restoreDefault = (scopeSelector, keyPath) ->
     Grim.deprecate("Use ::unset instead.")
     @unset(scopeSelector, keyPath)
@@ -1190,7 +1199,7 @@ if Grim.includeDeprecatedAPIs
 
   Config::toggle = (keyPath) ->
     Grim.deprecate 'Config::toggle is no longer supported. Please remove from your code.'
-    @set(keyPath, !@get(keyPath))
+    @set(keyPath, not @get(keyPath))
 
   Config::unobserve = (keyPath) ->
     Grim.deprecate 'Config::unobserve no longer does anything. Call `.dispose()` on the object returned by Config::observe instead.'
